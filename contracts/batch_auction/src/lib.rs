@@ -33,6 +33,12 @@ const MAX_ORDER_LIFETIME_SECS: u64 = 7 * 24 * 60 * 60;
 const MIN_TTL: u32 = 172_800;
 const BUMP_TO: u32 = 518_400;
 
+/// Persistent-storage TTL for orders, claimables and the venue registry.
+/// Must outlive `MAX_ORDER_LIFETIME_SECS` plus a claim window, so a trader
+/// can always `claim_refund` a stranded refund long after the order expired.
+const PERSISTENT_MIN_TTL: u32 = 172_800;
+const PERSISTENT_BUMP_TO: u32 = 3_110_400;
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -151,6 +157,14 @@ fn max_orders(env: &Env) -> u32 {
 
 fn extend_ttl(env: &Env) {
     env.storage().instance().extend_ttl(MIN_TTL, BUMP_TO);
+}
+
+/// Bump the TTL of a persistent entry so it outlives the order lifetime plus
+/// a claim window. Called on every write and every read of `Order`/`Claimable`.
+fn bump_persistent(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, PERSISTENT_MIN_TTL, PERSISTENT_BUMP_TO);
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -360,7 +374,8 @@ impl BatchAuction {
             alt_pool,
         };
 
-        env.storage().instance().set(&DataKey::Order(id), &order);
+        env.storage().persistent().set(&DataKey::Order(id), &order);
+        bump_persistent(&env, &DataKey::Order(id));
 
         pending.push_back(id);
         env.storage()
@@ -637,10 +652,11 @@ impl BatchAuction {
             .and_then(|r| r.ok())
             .is_some();
         if !ok {
-            env.storage().instance().set(
+            env.storage().persistent().set(
                 &DataKey::Claimable(order_id),
                 &(trader.clone(), token.clone(), amount),
             );
+            bump_persistent(env, &DataKey::Claimable(order_id));
             emit_versioned_event!(
                 env,
                 (Symbol::new(env, "order_refund_failed"), trader.clone()),
@@ -726,14 +742,15 @@ impl BatchAuction {
         trader.require_auth();
         let (owner, token, amount): (Address, Address, i128) = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Claimable(order_id))
             .ok_or(AuctionError::NothingToClaim)?;
+        bump_persistent(&env, &DataKey::Claimable(order_id));
         if owner != trader {
             return Err(AuctionError::Unauthorized);
         }
         env.storage()
-            .instance()
+            .persistent()
             .remove(&DataKey::Claimable(order_id));
         SepTokenClient::new(&env, &token).transfer(
             &env.current_contract_address(),
@@ -1246,6 +1263,17 @@ impl BatchAuction {
             .instance()
             .get(&DataKey::PendingAdmin)
             .unwrap_or(None)
+    }
+
+    /// Return the stranded `(trader, token, amount)` claimable for `order_id`,
+    /// or `None` if there is nothing to claim (issue #700).
+    pub fn get_claimable(env: Env, order_id: u64) -> Option<(Address, Address, i128)> {
+        let key = DataKey::Claimable(order_id);
+        let value: Option<(Address, Address, i128)> = env.storage().persistent().get(&key);
+        if value.is_some() {
+            bump_persistent(&env, &key);
+        }
+        value
     }
 }
 
