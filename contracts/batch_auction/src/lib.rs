@@ -24,6 +24,12 @@ use soroban_sdk::{
 
 const DEFAULT_MAX_ORDERS: u32 = 50;
 const MAX_ORDERS_CEILING: u32 = 200;
+/// Ceiling on the admin-managed venue allowlist (issue #700): `VenueList` is
+/// read and rewritten in full on every `add_venue`/`remove_venue` call, so an
+/// unbounded list would eventually make those calls exceed the ledger
+/// footprint/resource limits. `remove_venue` a stale entry to add another
+/// past this cap.
+const MAX_VENUES: u32 = 200;
 /// Ceiling on how far in the future a trader-supplied `deadline` may be
 /// (issue #700): otherwise a trader could pin their escrow open indefinitely
 /// with a far-future deadline, since only the trader's own `cancel_order` (or
@@ -76,6 +82,9 @@ pub enum AuctionError {
     /// `claim_refund` called for an order with no claimable balance on
     /// record (issue #700).
     NothingToClaim = 18,
+    /// `add_venue` would push the persistent venue registry past
+    /// `MAX_VENUES` (issue #700).
+    TooManyVenues = 19,
 }
 
 // ── Storage types ─────────────────────────────────────────────────────────────
@@ -745,7 +754,6 @@ impl BatchAuction {
             .persistent()
             .get(&DataKey::Claimable(order_id))
             .ok_or(AuctionError::NothingToClaim)?;
-        bump_persistent(&env, &DataKey::Claimable(order_id));
         if owner != trader {
             return Err(AuctionError::Unauthorized);
         }
@@ -1140,6 +1148,9 @@ impl BatchAuction {
                 .instance()
                 .get(&DataKey::VenueList)
                 .unwrap_or_else(|| Vec::new(&env));
+            if list.len() >= MAX_VENUES {
+                return Err(AuctionError::TooManyVenues);
+            }
             list.push_back(pool.clone());
             env.storage().instance().set(&DataKey::VenueList, &list);
         }
@@ -2682,6 +2693,43 @@ mod tests {
         assert_eq!(err, AuctionError::Unauthorized);
         let err = client.try_remove_venue(&rando, &p1).err().unwrap().unwrap();
         assert_eq!(err, AuctionError::Unauthorized);
+    }
+
+    #[test]
+    fn test_add_venue_rejects_past_max_venues_and_recovers_after_remove() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1000);
+        // Filling the allowlist to MAX_VENUES makes 200 contract calls in one
+        // test, which exceeds the default test-env CPU budget well before
+        // hitting any real resource limit.
+        env.budget().reset_unlimited();
+
+        let admin = Address::generate(&env);
+        let auction_addr = env.register_contract(None, BatchAuction);
+        let client = BatchAuctionClient::new(&env, &auction_addr);
+        client.initialize(&admin, &30_u64);
+
+        let mut pools: std::vec::Vec<Address> = std::vec::Vec::new();
+        for _ in 0..MAX_VENUES {
+            let pool = Address::generate(&env);
+            client.add_venue(&admin, &pool, &PoolType::Amm);
+            pools.push(pool);
+        }
+        assert_eq!(client.list_venues(&0_u32, &MAX_VENUES).len(), MAX_VENUES);
+
+        let one_too_many = Address::generate(&env);
+        let err = client
+            .try_add_venue(&admin, &one_too_many, &PoolType::Amm)
+            .err()
+            .unwrap()
+            .unwrap();
+        assert_eq!(err, AuctionError::TooManyVenues);
+
+        // Freeing a slot lets a new venue in again.
+        client.remove_venue(&admin, pools.first().unwrap());
+        client.add_venue(&admin, &one_too_many, &PoolType::Amm);
+        assert!(client.is_venue_allowed(&one_too_many));
     }
 
     #[test]
