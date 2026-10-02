@@ -403,7 +403,7 @@ impl BatchAuction {
 
         let order: Order = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Order(order_id))
             .ok_or(AuctionError::OrderNotFound)?;
 
@@ -418,7 +418,7 @@ impl BatchAuction {
             &order.amount_in,
         );
 
-        env.storage().instance().remove(&DataKey::Order(order_id));
+        env.storage().persistent().remove(&DataKey::Order(order_id));
 
         let pending: Vec<u64> = env
             .storage()
@@ -509,7 +509,7 @@ impl BatchAuction {
             let order_id = pending.get(i).unwrap();
             let order: Order = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::Order(order_id))
                 .unwrap();
 
@@ -531,7 +531,7 @@ impl BatchAuction {
                     (Symbol::new(&env, "order_expired"), order.trader.clone()),
                     (order_id,)
                 );
-                env.storage().instance().remove(&DataKey::Order(order_id));
+                env.storage().persistent().remove(&DataKey::Order(order_id));
                 continue;
             }
 
@@ -555,7 +555,7 @@ impl BatchAuction {
                     ),
                     (order_id,)
                 );
-                env.storage().instance().remove(&DataKey::Order(order_id));
+                env.storage().persistent().remove(&DataKey::Order(order_id));
                 continue;
             }
 
@@ -615,7 +615,7 @@ impl BatchAuction {
                     );
                 }
             }
-            env.storage().instance().remove(&DataKey::Order(order_id));
+            env.storage().persistent().remove(&DataKey::Order(order_id));
         }
 
         let mut remaining = Vec::<u64>::new(&env);
@@ -674,7 +674,7 @@ impl BatchAuction {
     pub fn expire_order(env: Env, order_id: u64) -> Result<(), AuctionError> {
         let order: Order = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Order(order_id))
             .ok_or(AuctionError::OrderNotFound)?;
         let now = env.ledger().timestamp();
@@ -688,7 +688,7 @@ impl BatchAuction {
             &order.token_in,
             order.amount_in,
         );
-        env.storage().instance().remove(&DataKey::Order(order_id));
+        env.storage().persistent().remove(&DataKey::Order(order_id));
         let pending: Vec<u64> = env
             .storage()
             .instance()
@@ -724,7 +724,7 @@ impl BatchAuction {
         for oid in pending.iter() {
             if let Some(order) = env
                 .storage()
-                .instance()
+                .persistent()
                 .get::<_, Order>(&DataKey::Order(oid))
             {
                 if now > order.deadline {
@@ -774,7 +774,7 @@ impl BatchAuction {
     pub fn quote_order(env: Env, order_id: u64) -> Result<(i128, Address, PoolType), AuctionError> {
         let order: Order = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Order(order_id))
             .ok_or(AuctionError::OrderNotFound)?;
         Ok(Self::best_venue(&env, &order))
@@ -1040,7 +1040,7 @@ impl BatchAuction {
         let mut orders = Vec::<Order>::new(&env);
         for i in 0..pending.len() {
             let id = pending.get(i).unwrap();
-            if let Some(order) = env.storage().instance().get(&DataKey::Order(id)) {
+            if let Some(order) = env.storage().persistent().get(&DataKey::Order(id)) {
                 orders.push_back(order);
             }
         }
@@ -2075,7 +2075,7 @@ mod tests {
         };
         env.as_contract(&auction_addr, || {
             env.storage()
-                .instance()
+                .persistent()
                 .set(&DataKey::Order(order.id), &order);
         });
 
@@ -2294,9 +2294,11 @@ mod tests {
         // address so that the payout try_transfer will trap.
         let fake_token_out = Address::generate(&env);
         env.as_contract(&auction_addr, || {
-            let mut bad_order: Order = env.storage().instance().get(&DataKey::Order(0)).unwrap();
+            let mut bad_order: Order = env.storage().persistent().get(&DataKey::Order(0)).unwrap();
             bad_order.token_out = fake_token_out.clone();
-            env.storage().instance().set(&DataKey::Order(0), &bad_order);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Order(0), &bad_order);
         });
 
         env.ledger().set_timestamp(1031);
@@ -2315,7 +2317,7 @@ mod tests {
         // than lost outright.
         let claimable: (Address, Address, i128) = env.as_contract(&auction_addr, || {
             env.storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::Claimable(0))
                 .unwrap()
         });
@@ -2354,9 +2356,9 @@ mod tests {
         // refund try_transfer traps.
         let fake_token_in = Address::generate(&env);
         env.as_contract(&auction_addr, || {
-            let mut order: Order = env.storage().instance().get(&DataKey::Order(0)).unwrap();
+            let mut order: Order = env.storage().persistent().get(&DataKey::Order(0)).unwrap();
             order.token_in = fake_token_in.clone();
-            env.storage().instance().set(&DataKey::Order(0), &order);
+            env.storage().persistent().set(&DataKey::Order(0), &order);
         });
 
         // Advance past the batch window AND the deadline.
@@ -2372,7 +2374,7 @@ mod tests {
         // than lost outright.
         let claimable: (Address, Address, i128) = env.as_contract(&auction_addr, || {
             env.storage()
-                .instance()
+                .persistent()
                 .get(&DataKey::Claimable(0))
                 .unwrap()
         });
@@ -2887,7 +2889,7 @@ mod tests {
         // isolates claim_refund's own payout/authorization/clearing logic.
         StellarAssetClient::new(&env, &ta).mint(&auction_addr, &5_000_i128);
         env.as_contract(&auction_addr, || {
-            env.storage().instance().set(
+            env.storage().persistent().set(
                 &DataKey::Claimable(42_u64),
                 &(trader.clone(), ta.clone(), 5_000_i128),
             );
